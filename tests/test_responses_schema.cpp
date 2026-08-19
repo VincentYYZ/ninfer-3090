@@ -143,6 +143,11 @@ int test_reasoning_effort() {
                   std::string("Responses did not accept protocol effort ") + wire);
     }
 
+    Json codex_summary = base;
+    codex_summary["reasoning"] = Json{{"effort", "medium"}, {"summary", "auto"}};
+    failures += check(!throws_api([&] { (void)parse_responses_request(codex_summary, limits()); }),
+                      "Codex automatic reasoning summary was rejected");
+
     Json low                            = base;
     low["reasoning"]                    = Json{{"effort", "low"}};
     const GenerationRequest low_request = parse_responses_request(low, limits()).generation;
@@ -280,12 +285,36 @@ int test_typed_items_and_tools() {
     const Json nested = Json::parse(request.generation.tools[0].definition_json);
     failures += check(nested.at("function").at("name") == "weather",
                       "Qwen prompt receives normalized nested function definition");
+
+    Json codex_body = body;
+    Json terminal   = function;
+    terminal["name"] = "terminal";
+    codex_body["tools"] = Json::array(
+        {function,
+         Json{{"type", "namespace"}, {"name", "mcp__example"}, {"tools", Json::array({terminal})}},
+         Json{{"type", "web_search"}, {"external_web_access", false}}});
+    const ResponsesRequest codex_request = parse_responses_request(codex_body, limits());
+    failures += check(codex_request.generation.tools.size() == 2 &&
+                          codex_request.generation.tools[0].name == "weather" &&
+                          codex_request.generation.tools[1].name == "terminal",
+                      "Codex namespace functions are flattened and disabled web search is ignored");
     return failures;
 }
 
 int test_explicit_rejections() {
     const Json base = {{"model", "qwen3.6-27b"}, {"input", "hello"}, {"max_output_tokens", 32}};
     int failures    = 0;
+
+    Json codex_include = base;
+    codex_include["include"] = Json::array({"reasoning.encrypted_content"});
+    failures += check(!throws_api([&] { (void)parse_responses_request(codex_include, limits()); }),
+                      "Codex encrypted reasoning include was rejected");
+
+    Json codex_serial_tools          = base;
+    codex_serial_tools["parallel_tool_calls"] = false;
+    failures += check(!throws_api(
+                          [&] { (void)parse_responses_request(codex_serial_tools, limits()); }),
+                      "Codex serial tool request was rejected instead of normalized");
 
     Json strict     = base;
     strict["tools"] = Json::array({Json{

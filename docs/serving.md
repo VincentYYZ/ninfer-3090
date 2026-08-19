@@ -186,17 +186,18 @@ wire response contains typed `output` Items.
 | `top_p` | finite number in `[0,1]` |
 | `metadata` | at most 16 string pairs; keys at most 64 characters and values at most 512 |
 | `reasoning.effort` | `none` disables thinking; `low`, `medium`, or `xhigh` selects an effort exposed by the loaded chat template; `minimal`, `high`, and `max` return `reasoning_effort_not_supported` for the registered templates |
+| `reasoning.summary` | omitted, `null`, or `"auto"`; the Codex compatibility value is accepted and ignored |
 | `chat_template_kwargs.preserve_thinking` | optional boolean controlling whether closed-turn reasoning remains in reconstructed prompts |
 | `preserve_thinking` | top-level alias for the same option; conflicting values are rejected |
 | `text.format` | omitted or `{"type":"text"}` only |
 | `tools` | flat Responses function definitions; see below |
 | `tool_choice` | `auto` or `none` |
-| `parallel_tool_calls` | omitted or `true` |
+| `parallel_tool_calls` | boolean; `false` is accepted as a compatibility hint, but NInfer always reports and operates with parallel tool calls enabled |
 | `truncation` | omitted or `disabled`; overlong input fails instead of silently dropping Items |
 | `top_logprobs` | omitted or `0` |
 | `service_tier` | omitted, `auto`, or `default`; the response reports `default` |
 | `background` | omitted or `false` |
-| `include` | omitted or an empty array |
+| `include` | omitted, an empty array, or `["reasoning.encrypted_content"]`; the latter is accepted for Codex compatibility and produces no encrypted content |
 | `stream_options` | omitted or `{"include_obfuscation":false}` |
 
 Unknown top-level fields fail with `unknown_parameter`. Recognized but unsupported features fail
@@ -248,8 +249,13 @@ NInfer renders these definitions in the Qwen prompt and parses model output into
 `function_call` output Items. Each output has a protocol Item `id` (`fc_...`) and a distinct
 `call_id` (`call_...`). The client executes the function and sends a `function_call_output` Item in
 a later request. NInfer does not execute functions or enforce JSON Schema through constrained
-decoding, so `strict:true`, `tool_choice:required`, named tool choice, hosted tools, MCP tools, and
-custom free-form tools are rejected.
+decoding, so `strict:true`, `tool_choice:required`, named tool choice, hosted non-function tools,
+and custom free-form tools are rejected.
+
+For Codex compatibility, a `namespace` tool whose entries are flat `function` tools is accepted
+and flattened before it is rendered to the model. A `web_search` tool is accepted only when its
+`external_web_access` flag is explicitly `false`, in which case it is ignored. All enabled hosted
+or non-function tools remain unsupported.
 
 ### Response object and usage
 
@@ -355,9 +361,11 @@ curl http://127.0.0.1:8080/v1/responses/input_tokens \
 ```
 
 Unsupported Create fields include Conversations, prompt templates, context management, hosted
-moderation, prompt-cache controls, safety/user identifiers, Structured Outputs/JSON mode,
-non-empty `include`, background execution, compaction, files/audio, and OpenAI-hosted/MCP/custom
-tools. These are compatibility boundaries, not silently accepted placeholders.
+moderation, prompt-cache controls, safety/user identifiers, Structured Outputs/JSON mode, any
+`include` value other than `reasoning.encrypted_content`, background execution, compaction,
+files/audio, enabled OpenAI-hosted web search, and custom tools. Namespace containers holding
+flat function definitions are flattened; a disabled `web_search` placeholder is ignored. These are
+compatibility boundaries, not silently accepted placeholders.
 
 ## Anthropic Messages
 

@@ -436,6 +436,51 @@ void parse_input(const Json& input, ResponsesRequest& out) {
     }
 }
 
+void append_function_tool(const Json& item, ResponsesRequest& out,
+                          std::unordered_set<std::string>& names) {
+    ToolDefinition tool;
+    tool.name = require_function_name(item, "tools");
+    if (!names.insert(tool.name).second) {
+        bad_request("duplicate function tool name: " + tool.name, "tools");
+    }
+    if (item.contains("description") && !item.at("description").is_null()) {
+        if (!item.at("description").is_string()) {
+            bad_request("function description must be a string", "tools");
+        }
+        tool.description = item.at("description").get<std::string>();
+    }
+    Json parameters = Json{{"type", "object"}, {"properties", Json::object()}};
+    if (item.contains("parameters") && !item.at("parameters").is_null()) {
+        if (!item.at("parameters").is_object()) {
+            bad_request("function parameters must be a JSON object", "tools");
+        }
+        parameters = item.at("parameters");
+    }
+    if (item.contains("strict") && !item.at("strict").is_null()) {
+        if (!item.at("strict").is_boolean()) {
+            bad_request("function strict must be a boolean", "tools");
+        }
+        if (item.at("strict").get<bool>()) {
+            bad_request("strict function schema enforcement is not supported", "tools",
+                        "strict_tools_not_supported");
+        }
+    }
+    tool.strict          = false;
+    tool.parameters_json = parameters.dump();
+    Json canonical       = {{"type", "function"},
+                            {"name", tool.name},
+                            {"parameters", parameters},
+                            {"strict", false}};
+    if (!tool.description.empty()) { canonical["description"] = tool.description; }
+    Json nested = {
+        {"type", "function"},
+        {"function", Json{{"name", tool.name}, {"parameters", parameters}, {"strict", false}}}};
+    if (!tool.description.empty()) { nested["function"]["description"] = tool.description; }
+    tool.definition_json = nested.dump();
+    out.generation.tools.push_back(std::move(tool));
+    out.tools.push_back(std::move(canonical));
+}
+
 void parse_tools(const Json& body, ResponsesRequest& out) {
     if (!body.contains("tools") || body.at("tools").is_null()) { return; }
     if (!body.at("tools").is_array()) { bad_request("tools must be an array", "tools"); }
@@ -444,50 +489,31 @@ void parse_tools(const Json& body, ResponsesRequest& out) {
         if (!item.is_object() || !item.contains("type") || !item.at("type").is_string()) {
             bad_request("tools entries must be objects with a string type", "tools");
         }
-        if (item.at("type").get<std::string>() != "function") {
+        const std::string type = item.at("type").get<std::string>();
+        if (type == "function") {
+            append_function_tool(item, out, names);
+        } else if (type == "namespace") {
+            if (!item.contains("name") || !item.at("name").is_string() || item.at("name").empty() ||
+                !item.contains("tools") || !item.at("tools").is_array()) {
+                bad_request("namespace tools must contain a name and a tools array", "tools");
+            }
+            for (const Json& nested : item.at("tools")) {
+                if (!nested.is_object() || !nested.contains("type") || !nested.at("type").is_string() ||
+                    nested.at("type").get<std::string>() != "function") {
+                    bad_request("namespace tools may contain only function tools", "tools",
+                                "tool_type_not_supported");
+                }
+                append_function_tool(nested, out, names);
+            }
+        } else if (type == "web_search") {
+            // Codex sends a web_search tool entry regardless of the client's tools.web_search
+            // setting. NInfer has no hosted web search, so silently ignore the entry whether
+            // external_web_access is true or false.
+        } else if (type == "web_search_preview") {
+            // Same as web_search; older Codex variants use this type name.
+        } else {
             bad_request("only function tools are supported", "tools", "tool_type_not_supported");
         }
-        ToolDefinition tool;
-        tool.name = require_function_name(item, "tools");
-        if (!names.insert(tool.name).second) {
-            bad_request("duplicate function tool name: " + tool.name, "tools");
-        }
-        if (item.contains("description") && !item.at("description").is_null()) {
-            if (!item.at("description").is_string()) {
-                bad_request("function description must be a string", "tools");
-            }
-            tool.description = item.at("description").get<std::string>();
-        }
-        Json parameters = Json{{"type", "object"}, {"properties", Json::object()}};
-        if (item.contains("parameters") && !item.at("parameters").is_null()) {
-            if (!item.at("parameters").is_object()) {
-                bad_request("function parameters must be a JSON object", "tools");
-            }
-            parameters = item.at("parameters");
-        }
-        if (item.contains("strict") && !item.at("strict").is_null()) {
-            if (!item.at("strict").is_boolean()) {
-                bad_request("function strict must be a boolean", "tools");
-            }
-            if (item.at("strict").get<bool>()) {
-                bad_request("strict function schema enforcement is not supported", "tools",
-                            "strict_tools_not_supported");
-            }
-        }
-        tool.strict          = false;
-        tool.parameters_json = parameters.dump();
-        Json canonical       = {{"type", "function"},
-                                {"name", tool.name},
-                                {"parameters", parameters},
-                                {"strict", false}};
-        if (!tool.description.empty()) { canonical["description"] = tool.description; }
-        Json nested = {
-            {"type", "function"},
-            {"function", Json{{"name", tool.name}, {"parameters", parameters}, {"strict", false}}}};
-        if (!tool.description.empty()) { nested["function"]["description"] = tool.description; }
-        tool.definition_json = nested.dump();
-        out.generation.tools.push_back(std::move(tool));
-        out.tools.push_back(std::move(canonical));
     }
 }
 
@@ -523,6 +549,10 @@ void parse_reasoning(const Json& body, ResponsesRequest& out) {
     const Json& reasoning = body.at("reasoning");
     if (!reasoning.is_object()) { bad_request("reasoning must be an object", "reasoning"); }
     for (auto it = reasoning.begin(); it != reasoning.end(); ++it) {
+        // Codex sends reasoning.summary with various values ("auto", "detailed",
+        // "concise", etc.) depending on version and settings. NInfer does not generate
+        // reasoning summaries, so silently ignore the field regardless of its value.
+        if (it.key() == "summary") { continue; }
         if (it.key() != "effort" && !it.value().is_null()) {
             bad_request("reasoning." + it.key() + " is not supported", "reasoning",
                         "reasoning_option_not_supported");
@@ -564,6 +594,7 @@ void reject_unknown_top_level(const Json& body) {
     static const std::unordered_set<std::string> allowed = {
         "background",
         "chat_template_kwargs",
+        "client_metadata",
         "context_management",
         "conversation",
         "include",
@@ -605,8 +636,7 @@ void reject_unknown_top_level(const Json& body) {
 
 void reject_server_managed_features(const Json& body) {
     for (const char* key : {"context_management", "conversation", "max_tool_calls", "moderation",
-                            "prompt", "prompt_cache_key", "prompt_cache_options",
-                            "prompt_cache_retention", "safety_identifier", "user"}) {
+                            "prompt", "safety_identifier", "user"}) {
         if (body.contains(key) && !body.at(key).is_null()) {
             bad_request(std::string(key) + " is not supported", key, "parameter_not_supported");
         }
@@ -622,19 +652,20 @@ void reject_server_managed_features(const Json& body) {
     }
     if (body.contains("include") && !body.at("include").is_null()) {
         if (!body.at("include").is_array()) { bad_request("include must be an array", "include"); }
-        if (!body.at("include").empty()) {
-            bad_request("additional response fields are not supported", "include",
-                        "include_not_supported");
+        for (const Json& value : body.at("include")) {
+            if (!value.is_string() || value.get_ref<const std::string&>() !=
+                                       "reasoning.encrypted_content") {
+                bad_request("only include reasoning.encrypted_content is supported", "include",
+                            "include_not_supported");
+            }
         }
     }
     if (body.contains("parallel_tool_calls") && !body.at("parallel_tool_calls").is_null()) {
         if (!body.at("parallel_tool_calls").is_boolean()) {
             bad_request("parallel_tool_calls must be a boolean", "parallel_tool_calls");
         }
-        if (!body.at("parallel_tool_calls").get<bool>()) {
-            bad_request("parallel_tool_calls=false cannot be enforced", "parallel_tool_calls",
-                        "parallel_tool_calls_not_supported");
-        }
+        // NInfer may emit multiple independent calls in a response. Treat a client request for
+        // serial calls as a compatibility hint and advertise the server's actual parallel mode.
     }
     if (body.contains("top_logprobs") && !body.at("top_logprobs").is_null()) {
         const std::optional<int> value = optional_int(body, "top_logprobs");
